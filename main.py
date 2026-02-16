@@ -1639,7 +1639,7 @@ def embed_captions_in_video(video_path, lecture_title, lecture_dir):
                     try:
                         os.remove(vtt_file)
                     except OSError:
-                        pass
+                        logger.debug(f"    > Could not remove VTT file after failed embedding: {os.path.basename(vtt_file)}")
     except Exception:
         logger.exception("    > Error embedding captions into video")
         if os.path.isfile(temp_path):
