@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 import argparse
+import glob
 import json
 import logging
 import math
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -55,10 +57,11 @@ info = None
 keys = {}
 id_as_course_name = False
 is_subscription_course = False
-use_h265 = False
-h265_crf = 28
+use_h265 = True
+h265_crf = 20
 h265_preset = "medium"
 use_nvenc = False
+use_videotoolbox = True
 browser = None
 cj = None
 use_continuous_lecture_numbers = False
@@ -101,7 +104,7 @@ def parse_chapter_filter(chapter_str: str):
 
 # this is the first function that is called, we parse the arguments, setup the logger, and ensure that required directories exist
 def pre_run():
-    global dl_assets, dl_captions, dl_quizzes, skip_lectures, caption_locale, quality, bearer_token, course_name, keep_vtt, skip_hls, concurrent_downloads, load_from_file, save_to_file, bearer_token, course_url, info, logger, keys, id_as_course_name, LOG_LEVEL, use_h265, h265_crf, h265_preset, use_nvenc, browser, is_subscription_course, DOWNLOAD_DIR, use_continuous_lecture_numbers, chapter_filter
+    global dl_assets, dl_captions, dl_quizzes, skip_lectures, caption_locale, quality, bearer_token, course_name, keep_vtt, skip_hls, concurrent_downloads, load_from_file, save_to_file, bearer_token, course_url, info, logger, keys, id_as_course_name, LOG_LEVEL, use_h265, h265_crf, h265_preset, use_nvenc, use_videotoolbox, browser, is_subscription_course, DOWNLOAD_DIR, use_continuous_lecture_numbers, chapter_filter
 
     # make sure the logs directory exists
     if not os.path.exists(LOG_DIR_PATH):
@@ -172,7 +175,7 @@ def pre_run():
         "--keep-vtt",
         dest="keep_vtt",
         action="store_true",
-        help="If specified, .vtt files won't be removed",
+        help="If specified, .vtt and .srt caption files won't be removed after embedding into the video",
     )
     parser.add_argument(
         "--skip-hls",
@@ -237,27 +240,47 @@ def pre_run():
         "--use-h265",
         dest="use_h265",
         action="store_true",
-        help="If specified, videos will be encoded with the H.265 codec",
+        default=True,
+        help="Enable H.265 (HEVC) encoding (default: enabled)",
+    )
+    parser.add_argument(
+        "--no-h265",
+        dest="use_h265",
+        action="store_false",
+        help="Disable H.265 encoding, use stream copy instead",
     )
     parser.add_argument(
         "--h265-crf",
         dest="h265_crf",
         type=int,
-        default=28,
-        help="Set a custom CRF value for H.265 encoding. FFMPEG default is 28",
+        default=20,
+        help="Set a custom CRF value for H.265 encoding (default: 20). Used directly for libx265/nvenc; mapped to equivalent quality for VideoToolbox",
     )
     parser.add_argument(
         "--h265-preset",
         dest="h265_preset",
         type=str,
         default="medium",
-        help="Set a custom preset value for H.265 encoding. FFMPEG default is medium",
+        help="Set a custom preset value for H.265 encoding. FFMPEG default is medium (not used with VideoToolbox)",
     )
     parser.add_argument(
         "--use-nvenc",
         dest="use_nvenc",
         action="store_true",
-        help="Whether to use the NVIDIA hardware transcoding for H.265. Only works if you have a supported NVIDIA GPU and ffmpeg with nvenc support",
+        help="Use NVIDIA NVENC hardware transcoding for H.265. Only works if you have a supported NVIDIA GPU and ffmpeg with nvenc support",
+    )
+    parser.add_argument(
+        "--use-videotoolbox",
+        dest="use_videotoolbox",
+        action="store_true",
+        default=True,
+        help="Use Apple VideoToolbox hardware acceleration for H.265 encoding/decoding on macOS Apple Silicon (M1/M2/M3/M4) (default: enabled)",
+    )
+    parser.add_argument(
+        "--no-videotoolbox",
+        dest="use_videotoolbox",
+        action="store_false",
+        help="Disable Apple VideoToolbox hardware acceleration, use software encoding instead",
     )
     parser.add_argument(
         "--out",
@@ -317,14 +340,11 @@ def pre_run():
         course_url = args.course_url
     if args.info:
         info = args.info
-    if args.use_h265:
-        use_h265 = True
-    if args.h265_crf:
-        h265_crf = args.h265_crf
-    if args.h265_preset:
-        h265_preset = args.h265_preset
-    if args.use_nvenc:
-        use_nvenc = True
+    use_h265 = args.use_h265
+    h265_crf = args.h265_crf
+    h265_preset = args.h265_preset
+    use_nvenc = args.use_nvenc
+    use_videotoolbox = args.use_videotoolbox
     if args.log_level:
         if args.log_level.upper() == "DEBUG":
             LOG_LEVEL = logging.DEBUG
@@ -1268,6 +1288,41 @@ def durationtoseconds(period):
         return None
 
 
+def _get_h265_encoder_args():
+    """Return the codec, hwaccel args, quality args, and audio codec for H.265 encoding.
+
+    VideoToolbox (macOS Apple Silicon): Uses hevc_videotoolbox with main profile,
+    -q:v for constant quality (1-100), hvc1 tag, and AAC audio for native Apple
+    macOS/iOS player compatibility. -allow_sw 1 enables software fallback.
+
+    NVENC (NVIDIA GPU): Uses hevc_nvenc with CUDA hwaccel and CRF/preset.
+
+    Software fallback: Uses libx265 with CRF/preset.
+    """
+    if use_nvenc:
+        codec = "hevc_nvenc"
+        hwaccel = "-hwaccel cuda -hwaccel_output_format cuda"
+        quality_args = f"-crf {h265_crf} -preset {h265_preset}"
+        audio_codec = "copy"
+    elif use_videotoolbox and platform.system() == "Darwin":
+        codec = "hevc_videotoolbox"
+        hwaccel = "-hwaccel videotoolbox"
+        # VideoToolbox uses -q:v (1-100, higher=better) for constant quality on Apple Silicon.
+        # Map CRF (0-51, lower=better) to q:v scale. Default CRF 20 -> q:v 61.
+        vt_quality = max(1, min(100, round((51 - h265_crf) / 51 * 100)))
+        # -profile:v main for broad Apple device compatibility
+        # -allow_sw 1 enables software fallback if HW encoder unavailable
+        quality_args = f"-profile:v main -q:v {vt_quality} -allow_sw 1"
+        # AAC audio for native macOS/iOS player compatibility
+        audio_codec = "aac"
+    else:
+        codec = "libx265"
+        hwaccel = ""
+        quality_args = f"-crf {h265_crf} -preset {h265_preset}"
+        audio_codec = "copy"
+    return codec, hwaccel, quality_args, audio_codec
+
+
 def mux_process(
     video_filepath: str,
     audio_filepath: str,
@@ -1276,8 +1331,7 @@ def mux_process(
     audio_key: Union[str | None] = None,
     video_key: Union[str | None] = None,
 ):
-    codec = "hevc_nvenc" if use_nvenc else "libx265"
-    transcode = "-hwaccel cuda -hwaccel_output_format cuda" if use_nvenc else ""
+    codec, hwaccel, quality_args, audio_codec = _get_h265_encoder_args()
     audio_decryption_arg = (
         f"-decryption_key {audio_key}" if audio_key is not None else ""
     )
@@ -1287,12 +1341,12 @@ def mux_process(
 
     if os.name == "nt":
         if use_h265:
-            command = f'ffmpeg {transcode} -y {video_decryption_arg} -i "{video_filepath}" {audio_decryption_arg} -i "{audio_filepath}" -c:v {codec} -vtag hvc1 -crf {h265_crf} -preset {h265_preset} -c:a copy -fflags +bitexact -shortest -map_metadata -1 -metadata title="{video_title}" -metadata comment="Downloaded with Udemy-Downloader by Puyodead1 (https://github.com/Puyodead1/udemy-downloader)" "{output_path}"'
+            command = f'ffmpeg {hwaccel} -y {video_decryption_arg} -i "{video_filepath}" {audio_decryption_arg} -i "{audio_filepath}" -c:v {codec} -vtag hvc1 {quality_args} -c:a {audio_codec} -fflags +bitexact -shortest -map_metadata -1 -metadata title="{video_title}" -metadata comment="Downloaded with Udemy-Downloader by Puyodead1 (https://github.com/Puyodead1/udemy-downloader)" "{output_path}"'
         else:
             command = f'ffmpeg -y {video_decryption_arg} -i "{video_filepath}" {audio_decryption_arg} -i "{audio_filepath}" -c copy -fflags +bitexact -shortest -map_metadata -1 -metadata title="{video_title}" -metadata comment="Downloaded with Udemy-Downloader by Puyodead1 (https://github.com/Puyodead1/udemy-downloader)" "{output_path}"'
     else:
         if use_h265:
-            command = f'nice -n 7 ffmpeg {transcode} -y {video_decryption_arg} -i "{video_filepath}" {audio_decryption_arg} -i "{audio_filepath}" -c:v {codec} -vtag hvc1 -crf {h265_crf} -preset {h265_preset} -c:a copy -fflags +bitexact -shortest -map_metadata -1 -metadata title="{video_title}" -metadata comment="Downloaded with Udemy-Downloader by Puyodead1 (https://github.com/Puyodead1/udemy-downloader)" "{output_path}"'
+            command = f'nice -n 7 ffmpeg {hwaccel} -y {video_decryption_arg} -i "{video_filepath}" {audio_decryption_arg} -i "{audio_filepath}" -c:v {codec} -vtag hvc1 {quality_args} -c:a {audio_codec} -fflags +bitexact -shortest -map_metadata -1 -metadata title="{video_title}" -metadata comment="Downloaded with Udemy-Downloader by Puyodead1 (https://github.com/Puyodead1/udemy-downloader)" "{output_path}"'
         else:
             command = f'nice -n 7 ffmpeg -y {video_decryption_arg} -i "{video_filepath}" {audio_decryption_arg} -i "{audio_filepath}" -c copy -fflags +bitexact -shortest -map_metadata -1 -metadata title="{video_title}" -metadata comment="Downloaded with Udemy-Downloader by Puyodead1 (https://github.com/Puyodead1/udemy-downloader)" "{output_path}"'
 
@@ -1525,6 +1579,105 @@ def download_aria(url, file_dir, filename):
     return ret_code
 
 
+def embed_captions_in_video(video_path, lecture_title, lecture_dir):
+    """Embed SRT caption files as subtitle tracks into the MP4 video container.
+
+    Finds all SRT files matching the lecture title in the lecture directory,
+    embeds them as soft subtitle tracks using the mov_text codec, and deletes
+    both the SRT and VTT files afterwards (unless keep_vtt is set).
+    SRT is used instead of VTT because mov_text in MP4 containers has wider
+    compatibility with offline players on macOS, iOS, and other platforms.
+    """
+    if not os.path.isfile(video_path):
+        return
+
+    sanitized_title = sanitize_filename(lecture_title)
+    srt_pattern = os.path.join(lecture_dir, f"{sanitized_title}_*.srt")
+    srt_files = sorted(glob.glob(srt_pattern))
+
+    if not srt_files:
+        return
+
+    logger.info(f"    > Embedding {len(srt_files)} SRT caption(s) into video container...")
+
+    temp_path = video_path + ".captioned.mp4"
+
+    cmd = ["ffmpeg", "-y", "-i", video_path]
+
+    for srt_file in srt_files:
+        cmd.extend(["-i", srt_file])
+
+    # Map video and audio from original file
+    cmd.extend(["-map", "0:v", "-map", "0:a?"])
+
+    # Map each subtitle input
+    for i in range(len(srt_files)):
+        cmd.extend(["-map", str(i + 1)])
+
+    # Copy video/audio streams, convert subtitles to mov_text for MP4
+    cmd.extend(["-c:v", "copy", "-c:a", "copy", "-c:s", "mov_text"])
+
+    # Add language metadata for each subtitle track
+    for i, srt_file in enumerate(srt_files):
+        # Extract language from filename pattern: "title_lang.srt"
+        basename = os.path.splitext(os.path.basename(srt_file))[0]
+        parts = basename.rsplit("_", 1)
+        if len(parts) == 2:
+            lang = parts[1]
+            cmd.extend([f"-metadata:s:s:{i}", f"language={lang}"])
+
+    cmd.append(temp_path)
+
+    try:
+        process = subprocess.Popen(cmd)
+        log_subprocess_output("FFMPEG-CAPTION-STDOUT", process.stdout)
+        log_subprocess_output("FFMPEG-CAPTION-STDERR", process.stderr)
+        ret_code = process.wait()
+
+        if ret_code == 0:
+            os.remove(video_path)
+            os.rename(temp_path, video_path)
+            logger.info("    > Caption embedding complete.")
+
+            # Delete SRT and VTT files after successful embedding
+            if not keep_vtt:
+                for srt_file in srt_files:
+                    try:
+                        os.remove(srt_file)
+                        logger.debug(f"    > Removed SRT file: {os.path.basename(srt_file)}")
+                    except OSError:
+                        logger.warning(f"    > Could not remove SRT file: {os.path.basename(srt_file)}")
+                # Also clean up corresponding VTT files
+                vtt_pattern = os.path.join(lecture_dir, f"{sanitized_title}_*.vtt")
+                for vtt_file in glob.glob(vtt_pattern):
+                    try:
+                        os.remove(vtt_file)
+                        logger.debug(f"    > Removed VTT file: {os.path.basename(vtt_file)}")
+                    except OSError:
+                        logger.warning(f"    > Could not remove VTT file: {os.path.basename(vtt_file)}")
+        else:
+            logger.error("    > Caption embedding failed (non-zero return code)")
+            if os.path.isfile(temp_path):
+                os.remove(temp_path)
+            # Clean up subtitle files even on failure if not keeping them
+            if not keep_vtt:
+                for srt_file in srt_files:
+                    try:
+                        os.remove(srt_file)
+                    except OSError:
+                        logger.debug(f"    > Could not remove SRT file after failed embedding: {os.path.basename(srt_file)}")
+                vtt_pattern = os.path.join(lecture_dir, f"{sanitized_title}_*.vtt")
+                for vtt_file in glob.glob(vtt_pattern):
+                    try:
+                        os.remove(vtt_file)
+                    except OSError:
+                        logger.debug(f"    > Could not remove VTT file after failed embedding: {os.path.basename(vtt_file)}")
+    except Exception:
+        logger.exception("    > Error embedding captions into video")
+        if os.path.isfile(temp_path):
+            os.remove(temp_path)
+
+
 def process_caption(caption, lecture_title, lecture_dir, tries=0):
     filename = f"%s_%s.%s" % (
         sanitize_filename(lecture_title),
@@ -1560,8 +1713,6 @@ def process_caption(caption, lecture_title, lecture_dir, tries=0):
                 logger.info("    > Converting caption to SRT format...")
                 convert(lecture_dir, filename_no_ext)
                 logger.info("    > Caption conversion complete.")
-                if not keep_vtt:
-                    os.remove(filepath)
             except Exception:
                 logger.exception(f"    > Error converting caption")
 
@@ -1638,24 +1789,30 @@ def process_lecture(lecture, lecture_path, chapter_dir):
                             tmp_file_path = lecture_path + ".tmp"
                             logger.info("      > HLS Download success")
                             if use_h265:
-                                codec = "hevc_nvenc" if use_nvenc else "libx265"
-                                transcode = (
-                                    "-hwaccel cuda -hwaccel_output_format cuda".split(
-                                        " "
-                                    )
-                                    if use_nvenc
+                                codec, hwaccel_str, quality_args_str, audio_codec = _get_h265_encoder_args()
+                                hwaccel_parts = (
+                                    hwaccel_str.split(" ")
+                                    if hwaccel_str
+                                    else []
+                                )
+                                quality_parts = (
+                                    quality_args_str.split(" ")
+                                    if quality_args_str
                                     else []
                                 )
                                 cmd = [
                                     "ffmpeg",
-                                    *transcode,
+                                    *hwaccel_parts,
                                     "-y",
                                     "-i",
                                     lecture_path,
                                     "-c:v",
                                     codec,
+                                    "-vtag",
+                                    "hvc1",
+                                    *quality_parts,
                                     "-c:a",
-                                    "copy",
+                                    audio_codec,
                                     "-f",
                                     "mp4",
                                     "-metadata",
@@ -1848,6 +2005,10 @@ def parse_new(udemy: Udemy, udemy_object: dict):
                     lang = subtitle.get("language")
                     if lang == caption_locale or caption_locale == "all":
                         process_caption(subtitle, lecture_title, chapter_dir)
+
+                # Embed SRT captions into the MP4 video container, then clean up SRT/VTT files
+                if os.path.isfile(lecture_path) and lecture_path.endswith(".mp4"):
+                    embed_captions_in_video(lecture_path, lecture_title, chapter_dir)
 
             if dl_assets:
                 assets = parsed_lecture.get("assets")
