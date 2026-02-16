@@ -18,7 +18,7 @@
 # Description
 
 Utility script to download Udemy courses, has support for DRM videos but requires the user to acquire the decryption key (for legal reasons).<br>
-Windows is the primary development OS, but I've made an effort to support Linux also (Mac untested).
+Windows is the primary development OS, but Linux and macOS (Apple Silicon M1/M2/M3/M4) are also supported with hardware-accelerated H.265 encoding via VideoToolbox.
 
 > [!IMPORTANT]  
 > This tool will not work on encrypted courses without decryption keys being provided!
@@ -102,8 +102,8 @@ You can now run the program, see the examples below. The course will download to
 ```
 usage: main.py [-h] -c COURSE_URL [-b BEARER_TOKEN] [-q QUALITY] [-l LANG] [-cd CONCURRENT_DOWNLOADS] [--skip-lectures] [--download-assets]
                [--download-captions] [--download-quizzes] [--keep-vtt] [--skip-hls] [--info] [--id-as-course-name] [-sc] [--save-to-file] [--load-from-file]
-               [--log-level LOG_LEVEL] [--browser {chrome,firefox,opera,edge,brave,chromium,vivaldi,safari}] [--use-h265] [--h265-crf H265_CRF] [--h265-preset H265_PRESET]
-               [--use-nvenc] [--out OUT] [--continue-lecture-numbers]
+               [--log-level LOG_LEVEL] [--browser {chrome,firefox,opera,edge,brave,chromium,vivaldi,safari,file}] [--use-h265] [--no-h265] [--h265-crf H265_CRF]
+               [--h265-preset H265_PRESET] [--use-nvenc] [--use-videotoolbox] [--no-videotoolbox] [--out OUT] [--continue-lecture-numbers]
                [--chapter CHAPTER_FILTER_RAW]
 
 Udemy Downloader
@@ -136,13 +136,16 @@ options:
                         expire after a certain amount of time)
   --log-level LOG_LEVEL
                         Logging level: one of DEBUG, INFO, ERROR, WARNING, CRITICAL (Default is INFO)
-  --browser {chrome,firefox,opera,edge,brave,chromium,vivaldi,safari}
+  --browser {chrome,firefox,opera,edge,brave,chromium,vivaldi,safari,file}
                         The browser to extract cookies from
-  --use-h265            If specified, videos will be encoded with the H.265 codec
-  --h265-crf H265_CRF   Set a custom CRF value for H.265 encoding. FFMPEG default is 28
+  --use-h265            Enable H.265 (HEVC) encoding (default: enabled)
+  --no-h265             Disable H.265 encoding, use stream copy instead
+  --h265-crf H265_CRF   Set a custom CRF value for H.265 encoding (default: 20). Used directly for libx265/nvenc; mapped to equivalent quality for VideoToolbox
   --h265-preset H265_PRESET
-                        Set a custom preset value for H.265 encoding. FFMPEG default is medium
-  --use-nvenc           Whether to use the NVIDIA hardware transcoding for H.265. Only works if you have a supported NVIDIA GPU and ffmpeg with nvenc support
+                        Set a custom preset value for H.265 encoding. FFMPEG default is medium (not used with VideoToolbox)
+  --use-nvenc           Use NVIDIA NVENC hardware transcoding for H.265. Only works if you have a supported NVIDIA GPU and ffmpeg with nvenc support
+  --use-videotoolbox    Use Apple VideoToolbox hardware acceleration for H.265 encoding/decoding on macOS Apple Silicon (M1/M2/M3/M4) (default: enabled)
+  --no-videotoolbox     Disable Apple VideoToolbox hardware acceleration, use software encoding instead
   --out OUT, -o OUT     Set the path to the output directory
   --continue-lecture-numbers, -n
                         Use continuous lecture numbering instead of per-chapter
@@ -191,14 +194,20 @@ options:
     -   `python main.py -c <Course URL> --log-level CRITICAL`
 -   Use course ID as the course name:
     -   `python main.py -c <Course URL> --id-as-course-name`
--   Encode in H.265:
-    -   `python main.py -c <Course URL> --use-h265`
--   Encode in H.265 with custom CRF:
-    -   `python main.py -c <Course URL> --use-h265 -h265-crf 20`
--   Encode in H.265 with custom preset:
-    -   `python main.py -c <Course URL> --use-h265 --h265-preset faster`
+-   Encode in H.265 (enabled by default, with Apple VideoToolbox hardware acceleration on macOS):
+    -   `python main.py -c <Course URL>`
+-   Disable H.265 encoding:
+    -   `python main.py -c <Course URL> --no-h265`
+-   Encode in H.265 with custom CRF (default: 20):
+    -   `python main.py -c <Course URL> --h265-crf 18`
+-   Encode in H.265 with custom preset (not used with VideoToolbox):
+    -   `python main.py -c <Course URL> --h265-preset faster`
 -   Encode in H.265 using NVIDIA hardware transcoding:
-    -   `python main.py -c <Course URL> --use-h265 --use-nvenc`
+    -   `python main.py -c <Course URL> --use-nvenc --no-videotoolbox`
+-   Disable Apple VideoToolbox hardware acceleration (use software libx265):
+    -   `python main.py -c <Course URL> --no-videotoolbox`
+-   Download captions and embed them into the MP4 container:
+    -   `python main.py -c <Course URL> --download-captions`
 -   Use continuous numbering (don't restart at 1 in every chapter):
     -   `python main.py -c <Course URL> --continue-lecture-numbers`
     -   `python main.py -c <Course URL> -n`
