@@ -124,7 +124,7 @@ options:
   --download-assets     If specified, lecture assets will be downloaded
   --download-captions   If specified, captions will be downloaded
   --download-quizzes    If specified, quizzes will be downloaded
-  --keep-vtt            If specified, .vtt files won't be removed
+  --keep-vtt            If specified, .vtt and .srt caption files won't be removed after embedding into the video
   --skip-hls            If specified, hls streams will be skipped (faster fetching) (hls streams usually contain 1080p quality for non-drm lectures)
   --info                If specified, only course information will be printed, nothing will be downloaded
   --id-as-course-name   If specified, the course id will be used in place of the course name for the output directory. This is a 'hack' to reduce the path length
@@ -174,7 +174,7 @@ options:
 -   Skip downloading lecture videos
     -   `python main.py -c <Course URL> --skip-lectures --download-captions` - Downloads only captions
     -   `python main.py -c <Course URL> --skip-lectures --download-assets` - Downloads only assets
--   Keep .VTT caption files:
+-   Keep .VTT and .SRT caption files (not deleted after embedding):
     -   `python main.py -c <Course URL> --download-captions --keep-vtt`
 -   Skip parsing HLS Streams (HLS streams usually contain 1080p quality for Non-DRM lectures):
     -   `python main.py -c <Course URL> --skip-hls`
@@ -206,7 +206,7 @@ options:
     -   `python main.py -c <Course URL> --use-nvenc --no-videotoolbox`
 -   Disable Apple VideoToolbox hardware acceleration (use software libx265):
     -   `python main.py -c <Course URL> --no-videotoolbox`
--   Download captions and embed them into the MP4 container:
+-   Download captions, embed SRT into the MP4 container, and clean up subtitle files:
     -   `python main.py -c <Course URL> --download-captions`
 -   Use continuous numbering (don't restart at 1 in every chapter):
     -   `python main.py -c <Course URL> --continue-lecture-numbers`
