@@ -1585,7 +1585,8 @@ def embed_captions_in_video(video_path, lecture_title, lecture_dir):
     Finds all SRT files matching the lecture title in the lecture directory,
     embeds them as soft subtitle tracks using the mov_text codec, and deletes
     both the SRT and VTT files afterwards (unless keep_vtt is set).
-    SRT is preferred over VTT for better offline playback compatibility.
+    SRT is used instead of VTT because mov_text in MP4 containers has wider
+    compatibility with offline players on macOS, iOS, and other platforms.
     """
     if not os.path.isfile(video_path):
         return
